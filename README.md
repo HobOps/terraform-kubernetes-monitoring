@@ -12,8 +12,14 @@ Providers (`helm`, `kubernetes`, `kubectl`) are configured by the **caller**.
 |-------|-----------|
 | (always) | kube-prometheus-stack (Prometheus, Grafana, optional Alertmanager) |
 | `enable_mimir` | Grafana Mimir (central long-term store; bundled MinIO by default) |
+| `enable_blackbox_exporter` | prometheus-blackbox-exporter (+ optional probe targets) |
+| `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged `/dev`) |
+| `enable_smartctl_exporter` | prometheus-smartctl-exporter (DaemonSet; disk SMART) |
 | `grafana_hostname` | Gateway API HTTPRoute to Grafana |
 | `remote_write_url` | Prometheus remote_write to a central Mimir (or other backend) |
+
+> **metrics-server:** not installed by this module. On k3s it usually ships in
+> `kube-system`; elsewhere install it only if you need `kubectl top` / HPA.
 
 ## Grafana metrics backend
 

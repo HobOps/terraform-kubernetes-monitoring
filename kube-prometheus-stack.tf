@@ -147,6 +147,11 @@ locals {
         {
           retention     = var.prometheus_retention
           retentionSize = var.prometheus_retention_size
+          # Pick up ServiceMonitors / PodMonitors / Probes / Rules from sibling exporter charts.
+          serviceMonitorSelectorNilUsesHelmValues = false
+          podMonitorSelectorNilUsesHelmValues     = false
+          probeSelectorNilUsesHelmValues          = false
+          ruleSelectorNilUsesHelmValues           = false
           storageSpec = {
             volumeClaimTemplate = {
               spec = merge(

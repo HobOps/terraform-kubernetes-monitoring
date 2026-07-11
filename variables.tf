@@ -161,13 +161,64 @@ variable "remote_write_basic_auth_password" {
   sensitive   = true
 }
 
+# --- Extra exporters (off by default) ---
+
+variable "enable_blackbox_exporter" {
+  description = "Install prometheus-blackbox-exporter (HTTP/TCP/ICMP probes)."
+  type        = bool
+  default     = false
+}
+
+variable "blackbox_targets" {
+  description = "Blackbox probe targets (ServiceMonitors via the chart). Empty deploys the exporter only."
+  type = list(object({
+    name   = string
+    url    = string
+    module = optional(string, "http_2xx")
+  }))
+  default = []
+}
+
+variable "enable_ipmi_exporter" {
+  description = "Install prometheus-ipmi-exporter (local OPENIPMI by default; needs host /dev access)."
+  type        = bool
+  default     = false
+}
+
+variable "enable_smartctl_exporter" {
+  description = "Install prometheus-smartctl-exporter (DaemonSet; privileged host /dev access)."
+  type        = bool
+  default     = false
+}
+
+variable "blackbox_exporter_values" {
+  description = "Extra values merged on top of module defaults for blackbox-exporter."
+  type        = any
+  default     = {}
+}
+
+variable "ipmi_exporter_values" {
+  description = "Extra values merged on top of module defaults for ipmi-exporter."
+  type        = any
+  default     = {}
+}
+
+variable "smartctl_exporter_values" {
+  description = "Extra values merged on top of module defaults for smartctl-exporter."
+  type        = any
+  default     = {}
+}
+
 # --- Chart versions / overrides ---
 
 variable "chart_versions" {
   description = "Helm chart versions. Omitted keys use module defaults."
   type = object({
-    kube_prometheus_stack = optional(string)
-    mimir_distributed     = optional(string)
+    kube_prometheus_stack   = optional(string)
+    mimir_distributed       = optional(string)
+    blackbox_exporter       = optional(string)
+    ipmi_exporter           = optional(string)
+    smartctl_exporter       = optional(string)
   })
   default = {}
 }
@@ -188,15 +239,22 @@ locals {
   chart_versions = {
     kube_prometheus_stack = coalesce(try(var.chart_versions.kube_prometheus_stack, null), "87.15.1")
     mimir_distributed     = coalesce(try(var.chart_versions.mimir_distributed, null), "6.1.0")
+    blackbox_exporter     = coalesce(try(var.chart_versions.blackbox_exporter, null), "11.15.1")
+    ipmi_exporter         = coalesce(try(var.chart_versions.ipmi_exporter, null), "0.8.0")
+    smartctl_exporter     = coalesce(try(var.chart_versions.smartctl_exporter, null), "0.17.1")
   }
 
   grafana_admin_password = coalesce(var.grafana_admin_password, random_password.grafana_admin.result)
 
-  mimir_query_url = coalesce(
-    var.mimir_url,
+  mimir_query_url = var.mimir_url != null ? var.mimir_url : (
     var.enable_mimir ? "http://mimir-nginx.${var.mimir_namespace}.svc.cluster.local/prometheus" : null
   )
 
-  release_name = "kube-prometheus-stack"
+  release_name         = "kube-prometheus-stack"
   grafana_service_name = "${local.release_name}-grafana"
+
+  # Shared label so Prometheus Operator (when using Helm selectors) still finds exporters.
+  service_monitor_labels = {
+    release = local.release_name
+  }
 }
