@@ -64,8 +64,13 @@ resource "helm_release" "ipmi_exporter" {
             ]
           }
         }
+        # Image defaults to nobody; /dev/ipmi0 is root:root mode 0600, so the
+        # process must run as root even with privileged=true.
         containerSecurityContext = {
-          privileged = true
+          privileged   = true
+          runAsUser    = 0
+          runAsGroup   = 0
+          runAsNonRoot = false
         }
         extraVolumes = [
           {
@@ -114,7 +119,7 @@ resource "helm_release" "smartctl_exporter" {
           extraLabels = local.service_monitor_labels
         }
         prometheusRules = {
-          enabled = true
+          enabled     = true
           extraLabels = local.service_monitor_labels
         }
       },

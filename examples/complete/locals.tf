@@ -1,10 +1,10 @@
 locals {
   kube_context = "example-c1"
 
-  grafana_hostname          = "grafana.c1.example.com"
-  grafana_metrics_backend   = "prometheus"
-  gateway_name              = "public-gateway"
-  gateway_namespace         = "infrastructure"
+  grafana_hostname        = "grafana.c1.example.com"
+  grafana_metrics_backend = "prometheus"
+  gateway_name            = "public-gateway"
+  gateway_namespace       = "infrastructure"
 
   enable_mimir = false
 

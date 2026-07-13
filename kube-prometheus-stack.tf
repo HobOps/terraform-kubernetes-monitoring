@@ -106,7 +106,7 @@ locals {
         }
       } : {},
       var.mimir_basic_auth_username != null ? {
-        basicAuth    = true
+        basicAuth     = true
         basicAuthUser = var.mimir_basic_auth_username
         secureJsonData = merge(
           var.mimir_tenant_id != null ? { httpHeaderValue1 = var.mimir_tenant_id } : {},

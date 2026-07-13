@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  # No path filters: required status checks must always report for branch protection.
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # PR-only gates: branch name + conventional commits
+  # ---------------------------------------------------------------------------
+  preflight:
+    # Always run on PR so the check reports for branch protection.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check branch name
+        run: ./scripts/check-branch-name.sh "${{ github.head_ref }}"
+
+      # Validates every commit in the PR. Squash-and-merge keeps the PR title
+      # (also conventional) as the final subject on main.
+      - name: Lint conventional commits
+        uses: wagoid/commitlint-github-action@f133a0d95090ef2609192b4a21f54e20af819ea9 # v6
+        with:
+          configFile: commitlint.config.js
+
+  # ---------------------------------------------------------------------------
+  # Terraform lint/validate: PR gate + post-merge sanity before release
+  # ---------------------------------------------------------------------------
+  terraform-lint:
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # Validate the module root and every example, without a backend/providers.
+      - name: Terraform validate
+        run: |
+          set -euo pipefail
+          for dir in . examples/*/; do
+            [ -f "${dir}/versions.tf" ] || [ -f "${dir}/main.tf" ] || continue
+            echo "==> terraform validate ${dir}"
+            terraform -chdir="${dir}" init -backend=false -input=false >/dev/null
+            terraform -chdir="${dir}" validate
+          done
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@6e87008f9dd1fe3e34e66aca6c97b4a69f72a7f4 # v4
+        with:
+          tflint_version: latest
+
+      - name: TFLint
+        run: |
+          set -euo pipefail
+          tflint --init
+          tflint --recursive --format compact
+
+  # ---------------------------------------------------------------------------
+  # Security scanning: PR gate + post-merge sanity before release
+  # ---------------------------------------------------------------------------
+  security:
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@7b972723c44fb3d256283fac96fae5d7c1894bb7 # v12
+        with:
+          directory: .
+          framework: terraform
+          config_file: .checkov.yaml
+          quiet: true
+          output_format: cli
+
+  # ---------------------------------------------------------------------------
+  # Release: on merge to main, compute the next semver tag from conventional
+  # commits and publish a GitHub release. Gated by lint + security.
+  # ---------------------------------------------------------------------------
+  release:
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    needs: [terraform-lint, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version tag
+        id: tag
+        uses: mathieudutour/github-tag-action@d28fa2ccfbd16e871a4bdf35e11b3ad1bd56c0c1 # v6.2
+        with:
+          github_token: ${{ github.token }}
+          default_bump: patch
+          release_branches: main
+          tag_prefix: v
+
+      - name: Create GitHub Release
+        if: steps.tag.outputs.new_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_TAG: ${{ steps.tag.outputs.new_tag }}
+          CHANGELOG: ${{ steps.tag.outputs.changelog }}
+        run: |
+          printf '%s\n' "${CHANGELOG}" > release-notes.md
+          gh release create "${NEW_TAG}" \
+            --title "${NEW_TAG}" \
+            --notes-file release-notes.md

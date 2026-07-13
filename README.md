@@ -6,6 +6,12 @@ always installed**; Mimir and the public Grafana route are optional.
 
 Providers (`helm`, `kubernetes`, `kubectl`) are configured by the **caller**.
 
+This module only **deploys** the monitoring stack. Grafana content (service
+accounts, folders, dashboards) is managed separately by
+[`terraform-grafana-config`](https://github.com/HobOps/terraform-grafana-config),
+which consumes this module's `grafana_admin_password` output through the
+caller-configured `grafana` provider — keeping the dependency graph acyclic.
+
 ## Components
 
 | Input | Component |
@@ -13,7 +19,7 @@ Providers (`helm`, `kubernetes`, `kubectl`) are configured by the **caller**.
 | (always) | kube-prometheus-stack (Prometheus, Grafana, optional Alertmanager) |
 | `enable_mimir` | Grafana Mimir (central long-term store; bundled MinIO by default) |
 | `enable_blackbox_exporter` | prometheus-blackbox-exporter (+ optional probe targets) |
-| `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged `/dev`) |
+| `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged root + `/dev`) |
 | `enable_smartctl_exporter` | prometheus-smartctl-exporter (DaemonSet; disk SMART) |
 | `grafana_hostname` | Gateway API HTTPRoute to Grafana |
 | `remote_write_url` | Prometheus remote_write to a central Mimir (or other backend) |
@@ -87,13 +93,34 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 
 ```
 .
-├── *.tf                 # root module (Registry-compatible)
-├── examples/complete/   # example caller stack
+├── *.tf                    # root module (Registry-compatible)
+├── examples/complete/      # example caller stack
+├── scripts/                # CI helpers (branch-name check)
+├── .github/workflows/ci.yml
+├── .tflint.hcl
+├── .checkov.yaml
+├── commitlint.config.js
 ├── LICENSE
 └── README.md
 ```
 
-## Versioning
+## CI / Versioning
 
-Tag releases with semver (`v0.1.0`, `v1.0.0`, …) so callers can pin `?ref=`
-and so the Terraform Registry can publish versions later.
+`.github/workflows/ci.yml` runs on pull requests to `main` and on pushes to
+`main`:
+
+| Job | When | Purpose |
+|-----|------|---------|
+| `preflight` | PR | Branch name (`feat/*`, `fix/*`, `revert-*`) + conventional commits (commitlint) |
+| `terraform-lint` | PR + push to main | `terraform fmt`, `validate` (root + examples), `tflint` |
+| `security` | PR + push to main | Checkov scan of the Terraform |
+| `release` | push to main | Compute next semver tag from conventional commits and publish a GitHub Release |
+
+Make `preflight`, `terraform-lint`, and `security` **required status checks** on
+`main` so a feature branch must pass them before merge. You can run the same
+pipeline on a feature branch by opening a PR against `main`.
+
+Versioning is driven by [Conventional Commits](https://www.conventionalcommits.org/):
+on merge to `main`, `feat:` bumps the minor, `fix:` the patch, and a
+`BREAKING CHANGE:`/`!` the major. The resulting tag (`vX.Y.Z`) is what callers
+pin with `?ref=`.

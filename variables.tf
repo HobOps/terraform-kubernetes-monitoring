@@ -214,11 +214,11 @@ variable "smartctl_exporter_values" {
 variable "chart_versions" {
   description = "Helm chart versions. Omitted keys use module defaults."
   type = object({
-    kube_prometheus_stack   = optional(string)
-    mimir_distributed       = optional(string)
-    blackbox_exporter       = optional(string)
-    ipmi_exporter           = optional(string)
-    smartctl_exporter       = optional(string)
+    kube_prometheus_stack = optional(string)
+    mimir_distributed     = optional(string)
+    blackbox_exporter     = optional(string)
+    ipmi_exporter         = optional(string)
+    smartctl_exporter     = optional(string)
   })
   default = {}
 }
