@@ -1,4 +1,4 @@
-module.exports = {
+export default {
   extends: ["@commitlint/config-conventional"],
   // GitHub merge/revert commits are not conventional; ignore them in CI ranges.
   ignores: [

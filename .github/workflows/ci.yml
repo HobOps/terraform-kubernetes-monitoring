@@ -23,3 +23,4 @@ jobs:
     uses: HobOps/github-actions/.github/workflows/terraform-module-ci.yml@v1
     permissions:
       contents: write # release job pushes tags / creates releases
+      pull-requests: read # commitlint lists the PR commits

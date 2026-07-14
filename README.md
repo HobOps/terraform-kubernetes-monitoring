@@ -98,7 +98,7 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 ├── .github/workflows/ci.yml
 ├── .tflint.hcl
 ├── .checkov.yaml
-├── commitlint.config.js
+├── commitlint.config.mjs
 ├── LICENSE
 └── README.md
 ```
