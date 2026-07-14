@@ -95,7 +95,6 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 .
 ├── *.tf                    # root module (Registry-compatible)
 ├── examples/complete/      # example caller stack
-├── scripts/                # CI helpers (branch-name check)
 ├── .github/workflows/ci.yml
 ├── .tflint.hcl
 ├── .checkov.yaml
@@ -106,8 +105,9 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 
 ## CI / Versioning
 
-`.github/workflows/ci.yml` runs on pull requests to `main` and on pushes to
-`main`:
+`.github/workflows/ci.yml` calls the shared reusable workflow
+[`HobOps/github-actions/.github/workflows/terraform-module-ci.yml`](https://github.com/HobOps/github-actions)
+on pull requests to `main` and on pushes to `main`:
 
 | Job | When | Purpose |
 |-----|------|---------|
@@ -116,9 +116,9 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 | `security` | PR + push to main | Checkov scan of the Terraform |
 | `release` | push to main | Compute next semver tag from conventional commits and publish a GitHub Release |
 
-Make `preflight`, `terraform-lint`, and `security` **required status checks** on
-`main` so a feature branch must pass them before merge. You can run the same
-pipeline on a feature branch by opening a PR against `main`.
+Make `ci / preflight`, `ci / terraform-lint`, and `ci / security` **required
+status checks** on `main` so a feature branch must pass them before merge. You
+can run the same pipeline on a feature branch by opening a PR against `main`.
 
 Versioning is driven by [Conventional Commits](https://www.conventionalcommits.org/):
 on merge to `main`, `feat:` bumps the minor, `fix:` the patch, and a
