@@ -75,10 +75,48 @@ variable "grafana_hostname" {
 }
 
 variable "grafana_admin_password" {
-  description = "Grafana admin password. If null, a random password is generated and exposed via output."
+  description = "Grafana admin password. Ignored when grafana_admin_existing_secret is set. If both are null, a random password is generated."
   type        = string
   default     = null
   sensitive   = true
+}
+
+variable "grafana_admin_existing_secret" {
+  description = "Name of an existing Kubernetes Secret with Grafana admin credentials (admin.existingSecret). Mutually exclusive with generating/setting grafana_admin_password. Provision the Secret outside this module (External Secrets, CSI, manual, etc.)."
+  type        = string
+  default     = null
+}
+
+variable "grafana_admin_user_key" {
+  description = "Key in grafana_admin_existing_secret for the admin username."
+  type        = string
+  default     = "username"
+}
+
+variable "grafana_admin_password_key" {
+  description = "Key in grafana_admin_existing_secret for the admin password."
+  type        = string
+  default     = "password"
+}
+
+variable "grafana_google_auth" {
+  description = <<-EOT
+    Google OIDC for Grafana (auth.google). Requires an existing Kubernetes Secret with client id/secret;
+    provision it outside this module (External Secrets, CSI, manual, etc.). null disables Google auth.
+  EOT
+  type = object({
+    enabled              = optional(bool, true)
+    existing_secret      = string
+    client_id_key        = optional(string, "client-id")
+    client_secret_key    = optional(string, "client-secret")
+    allowed_domains      = optional(list(string), [])
+    hosted_domain        = optional(string)
+    allow_sign_up        = optional(bool, true)
+    auto_login           = optional(bool, false)
+    auto_assign_org_role = optional(string, "Viewer")
+    skip_org_role_sync   = optional(bool, true)
+  })
+  default = null
 }
 
 variable "grafana_persistence_enabled" {
@@ -244,7 +282,81 @@ locals {
     smartctl_exporter     = coalesce(try(var.chart_versions.smartctl_exporter, null), "0.17.1")
   }
 
-  grafana_admin_password = coalesce(var.grafana_admin_password, random_password.grafana_admin.result)
+  grafana_admin_from_secret = var.grafana_admin_existing_secret != null
+
+  grafana_admin_secret_name = var.grafana_admin_existing_secret
+
+  grafana_admin_password = local.grafana_admin_from_secret ? null : coalesce(
+    var.grafana_admin_password,
+    try(random_password.grafana_admin[0].result, null),
+  )
+
+  grafana_google_auth_enabled = var.grafana_google_auth != null && try(var.grafana_google_auth.enabled, true)
+
+  grafana_google_auth_secret_name = local.grafana_google_auth_enabled ? var.grafana_google_auth.existing_secret : null
+
+  grafana_reloader_secrets = compact([
+    local.grafana_admin_secret_name,
+    local.grafana_google_auth_secret_name,
+  ])
+
+  grafana_admin_values_json = local.grafana_admin_from_secret ? jsonencode({
+    admin = {
+      existingSecret = local.grafana_admin_secret_name
+      userKey        = var.grafana_admin_user_key
+      passwordKey    = var.grafana_admin_password_key
+    }
+    }) : jsonencode({
+    adminPassword = local.grafana_admin_password
+  })
+
+  grafana_google_auth_values_json = local.grafana_google_auth_enabled ? jsonencode({
+    "grafana.ini" = {
+      server = {
+        domain   = coalesce(var.grafana_hostname, "")
+        root_url = var.grafana_hostname != null ? "https://%(domain)s/" : ""
+      }
+      "auth.google" = {
+        enabled                    = true
+        allow_sign_up              = var.grafana_google_auth.allow_sign_up
+        auto_login                 = var.grafana_google_auth.auto_login
+        client_id                  = "$__file{/etc/secrets/auth-google-client-id}"
+        client_secret              = "$__file{/etc/secrets/auth-google-client-secret}"
+        scopes                     = "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email"
+        auth_url                   = "https://accounts.google.com/o/oauth2/auth"
+        token_url                  = "https://accounts.google.com/o/oauth2/token"
+        skip_org_role_sync         = var.grafana_google_auth.skip_org_role_sync
+        auto_assign_org_role       = var.grafana_google_auth.auto_assign_org_role
+        allow_assign_grafana_admin = true
+        allowed_domains            = join(" ", var.grafana_google_auth.allowed_domains)
+        hosted_domain              = var.grafana_google_auth.hosted_domain == null ? "" : var.grafana_google_auth.hosted_domain
+      }
+    }
+    extraSecretMounts = [
+      {
+        name        = "auth-google-client-id"
+        secretName  = local.grafana_google_auth_secret_name
+        mountPath   = "/etc/secrets/auth-google-client-id"
+        readOnly    = true
+        subPath     = var.grafana_google_auth.client_id_key
+        defaultMode = 288 # 0440
+      },
+      {
+        name        = "auth-google-client-secret"
+        secretName  = local.grafana_google_auth_secret_name
+        mountPath   = "/etc/secrets/auth-google-client-secret"
+        readOnly    = true
+        subPath     = var.grafana_google_auth.client_secret_key
+        defaultMode = 288 # 0440
+      },
+    ]
+  }) : "{}"
+
+  grafana_reloader_values_json = length(local.grafana_reloader_secrets) > 0 ? jsonencode({
+    podAnnotations = {
+      "secret.reloader.stakater.com/reload" = join(",", local.grafana_reloader_secrets)
+    }
+  }) : "{}"
 
   mimir_query_url = var.mimir_url != null ? var.mimir_url : (
     var.enable_mimir ? "http://mimir-nginx.${var.mimir_namespace}.svc.cluster.local/prometheus" : null

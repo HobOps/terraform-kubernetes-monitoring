@@ -1,4 +1,6 @@
 resource "random_password" "grafana_admin" {
+  count = local.grafana_admin_from_secret || var.grafana_admin_password != null ? 0 : 1
+
   length  = 24
   special = false
 }
@@ -123,24 +125,29 @@ locals {
       enabled = var.enable_alertmanager
     }
 
-    grafana = {
-      enabled       = true
-      adminPassword = local.grafana_admin_password
-      ingress = {
-        enabled = false
-      }
-      persistence = {
-        enabled = var.grafana_persistence_enabled
-        size    = var.grafana_storage_size
-      }
-      forceDeployDatasources = var.grafana_metrics_backend == "mimir"
-      sidecar = {
-        datasources = {
-          defaultDatasourceEnabled = var.grafana_metrics_backend == "prometheus"
+    # jsondecode/jsonencode keeps merge() branches type-compatible across optional features.
+    grafana = merge(
+      {
+        enabled = true
+        ingress = {
+          enabled = false
         }
-      }
-      additionalDataSources = local.grafana_mimir_datasource
-    }
+        persistence = {
+          enabled = var.grafana_persistence_enabled
+          size    = var.grafana_storage_size
+        }
+        forceDeployDatasources = var.grafana_metrics_backend == "mimir"
+        sidecar = {
+          datasources = {
+            defaultDatasourceEnabled = var.grafana_metrics_backend == "prometheus"
+          }
+        }
+        additionalDataSources = local.grafana_mimir_datasource
+      },
+      jsondecode(local.grafana_admin_values_json),
+      jsondecode(local.grafana_google_auth_values_json),
+      jsondecode(local.grafana_reloader_values_json),
+    )
 
     prometheus = {
       prometheusSpec = merge(

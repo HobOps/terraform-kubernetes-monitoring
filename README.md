@@ -22,6 +22,8 @@ caller-configured `grafana` provider — keeping the dependency graph acyclic.
 | `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged root + `/dev`) |
 | `enable_smartctl_exporter` | prometheus-smartctl-exporter (DaemonSet; disk SMART) |
 | `grafana_hostname` | Gateway API HTTPRoute to Grafana |
+| `grafana_admin_existing_secret` | Use an existing K8s Secret for Grafana admin (else password / random) |
+| `grafana_google_auth` | Google OIDC (`auth.google`) via an existing K8s Secret |
 | `remote_write_url` | Prometheus remote_write to a central Mimir (or other backend) |
 
 > **metrics-server:** not installed by this module. On k3s it usually ships in
