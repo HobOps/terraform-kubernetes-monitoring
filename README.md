@@ -22,6 +22,7 @@ caller-configured `grafana` provider — keeping the dependency graph acyclic.
 | `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged root + `/dev`) |
 | `enable_smartctl_exporter` | prometheus-smartctl-exporter (DaemonSet; disk SMART) |
 | `grafana_hostname` | Gateway API HTTPRoute to Grafana |
+| `grafana_google_auth` | Grafana login with Google OAuth (credentials from an existing Secret) |
 | `remote_write_url` | Prometheus remote_write to a central Mimir (or other backend) |
 
 > **metrics-server:** not installed by this module. On k3s it usually ships in
@@ -33,6 +34,54 @@ Set `grafana_metrics_backend` to:
 
 - **`prometheus`** (default) — in-cluster Prometheus is Grafana’s default datasource.
 - **`mimir`** — Mimir is the default datasource; requires `enable_mimir = true` or `mimir_url`.
+
+## Grafana login with Google
+
+`grafana_google_auth` turns on Grafana's Google OAuth login. The client ID and
+secret stay in a Secret that the caller creates in the monitoring namespace;
+the module only references it (`GF_AUTH_GOOGLE_CLIENT_ID` /
+`GF_AUTH_GOOGLE_CLIENT_SECRET` env vars), so they never appear in Helm values.
+
+```hcl
+resource "kubernetes_secret" "grafana_google_auth" {
+  metadata {
+    name      = "grafana-google-auth"
+    namespace = module.monitoring.namespace # created by the module
+  }
+  data = {
+    "client-id"     = var.google_client_id
+    "client-secret" = var.google_client_secret
+  }
+}
+
+module "monitoring" {
+  # ...
+  grafana_hostname = "grafana.c1.example.com"
+  grafana_google_auth = {
+    # Referencing the resource orders the Secret before the Helm release.
+    existing_secret = kubernetes_secret.grafana_google_auth.metadata[0].name
+    allowed_domains = ["example.com"]
+  }
+}
+```
+
+- Requires `grafana_hostname`: it becomes `root_url`, and the redirect URI to
+  register in Google is `https://<grafana_hostname>/login/google`.
+- Defaults: sign-up on, new users get `Viewer`, `skip_org_role_sync = true`
+  (roles changed in Grafana stick), no auto-login. Override with
+  `allow_sign_up`, `auto_assign_org_role`, `skip_org_role_sync`, `auto_login`,
+  `hosted_domain`, `client_id_key`, `client_secret_key`.
+- One apply on a fresh cluster: the `namespace` output comes from the
+  module's namespace resource, so the Secret is created after the namespace
+  and, through `existing_secret`, before the Helm release.
+
+## Extra kube-prometheus-stack values
+
+`kube_prometheus_stack_values` is passed to Helm as a second values document,
+so Helm **deep-merges** it over the module defaults: maps merge key by key and
+lists replace. For example, adding
+`prometheus.prometheusSpec.additionalScrapeConfigs` keeps the module's
+retention, storage and selectors.
 
 ## Dependencies
 
