@@ -4,8 +4,8 @@ output "cluster_name" {
 }
 
 output "namespace" {
-  description = "Namespace where kube-prometheus-stack (and Grafana) run."
-  value       = var.namespace
+  description = "Namespace where kube-prometheus-stack (and Grafana) run. Read from the namespace resource, so callers that create Secrets in it (e.g. for grafana_google_auth) are ordered after it."
+  value       = kubernetes_namespace.monitoring.metadata[0].name
 }
 
 output "grafana_metrics_backend" {
