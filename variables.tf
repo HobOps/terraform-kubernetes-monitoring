@@ -81,6 +81,36 @@ variable "grafana_admin_password" {
   sensitive   = true
 }
 
+variable "grafana_google_auth" {
+  description = <<-EOT
+    Google OAuth login for Grafana. null disables it. The client ID and secret
+    come from an existing Secret in the monitoring namespace (keys
+    client_id_key / client_secret_key); the module never sees them. Requires
+    grafana_hostname (used as root_url for the OAuth redirect:
+    https://<grafana_hostname>/login/google).
+  EOT
+  type = object({
+    existing_secret      = string
+    client_id_key        = optional(string, "client-id")
+    client_secret_key    = optional(string, "client-secret")
+    allowed_domains      = optional(list(string), [])
+    hosted_domain        = optional(string)
+    auto_login           = optional(bool, false)
+    allow_sign_up        = optional(bool, true)
+    auto_assign_org_role = optional(string, "Viewer")
+    skip_org_role_sync   = optional(bool, true)
+  })
+  default = null
+
+  validation {
+    condition = var.grafana_google_auth == null || contains(
+      ["Viewer", "Editor", "Admin"],
+      try(var.grafana_google_auth.auto_assign_org_role, "Viewer"),
+    )
+    error_message = "grafana_google_auth.auto_assign_org_role must be Viewer, Editor or Admin."
+  }
+}
+
 variable "grafana_persistence_enabled" {
   description = "Enable PVC for Grafana."
   type        = bool
@@ -224,7 +254,7 @@ variable "chart_versions" {
 }
 
 variable "kube_prometheus_stack_values" {
-  description = "Extra values merged on top of the module defaults for kube-prometheus-stack (deep merge is caller's responsibility; this replaces keys at the top level of the encoded map via merge)."
+  description = "Extra values for kube-prometheus-stack, deep-merged by Helm on top of the module defaults (maps merge key by key; lists replace)."
   type        = any
   default     = {}
 }

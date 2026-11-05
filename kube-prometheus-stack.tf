@@ -35,11 +35,13 @@ resource "helm_release" "kube_prometheus_stack" {
   timeout          = 900
   wait             = true
 
+  # Two documents so Helm deep-merges the caller's values over the defaults.
+  # A single merge() would replace whole top-level keys: passing
+  # prometheus.prometheusSpec.additionalScrapeConfigs dropped the module's
+  # retention, storageSpec and selectors.
   values = [
-    yamlencode(merge(
-      local.kube_prometheus_stack_values,
-      var.kube_prometheus_stack_values,
-    ))
+    yamlencode(local.kube_prometheus_stack_values),
+    yamlencode(var.kube_prometheus_stack_values),
   ]
 
   depends_on = [
@@ -54,6 +56,10 @@ resource "helm_release" "kube_prometheus_stack" {
         local.mimir_query_url != null
       )
       error_message = "grafana_metrics_backend=mimir requires enable_mimir=true or mimir_url."
+    }
+    precondition {
+      condition     = var.grafana_google_auth == null || var.grafana_hostname != null
+      error_message = "grafana_google_auth requires grafana_hostname (OAuth redirect URL)."
     }
   }
 }
@@ -116,6 +122,60 @@ locals {
     )
   ]
 
+  # Placeholder when OAuth is off, so attribute reads below never hit null.
+  google_auth = var.grafana_google_auth != null ? var.grafana_google_auth : {
+    existing_secret      = ""
+    client_id_key        = ""
+    client_secret_key    = ""
+    allowed_domains      = []
+    hosted_domain        = null
+    auto_login           = false
+    allow_sign_up        = false
+    auto_assign_org_role = "Viewer"
+    skip_org_role_sync   = true
+  }
+
+  # grafana.ini and env for Google OAuth. Credentials come from the caller's
+  # Secret through GF_AUTH_GOOGLE_* env vars, never through values.
+  # jsonencode/jsondecode: both branches of the conditional must share a type.
+  grafana_google_auth_values = jsondecode(var.grafana_google_auth == null ? "{}" : jsonencode({
+    "grafana.ini" = {
+      server = {
+        root_url = "https://${var.grafana_hostname}"
+      }
+      "auth.google" = merge(
+        {
+          enabled            = true
+          scopes             = "openid email profile"
+          allowed_domains    = join(" ", local.google_auth.allowed_domains)
+          allow_sign_up      = local.google_auth.allow_sign_up
+          auto_login         = local.google_auth.auto_login
+          skip_org_role_sync = local.google_auth.skip_org_role_sync
+        },
+        local.google_auth.hosted_domain != null ? {
+          hosted_domain = local.google_auth.hosted_domain
+        } : {},
+      )
+      users = {
+        auto_assign_org_role = local.google_auth.auto_assign_org_role
+      }
+    }
+    envValueFrom = {
+      GF_AUTH_GOOGLE_CLIENT_ID = {
+        secretKeyRef = {
+          name = local.google_auth.existing_secret
+          key  = local.google_auth.client_id_key
+        }
+      }
+      GF_AUTH_GOOGLE_CLIENT_SECRET = {
+        secretKeyRef = {
+          name = local.google_auth.existing_secret
+          key  = local.google_auth.client_secret_key
+        }
+      }
+    }
+  }))
+
   kube_prometheus_stack_values = {
     fullnameOverride = local.release_name
 
@@ -123,7 +183,7 @@ locals {
       enabled = var.enable_alertmanager
     }
 
-    grafana = {
+    grafana = merge(local.grafana_google_auth_values, {
       enabled       = true
       adminPassword = local.grafana_admin_password
       ingress = {
@@ -140,7 +200,7 @@ locals {
         }
       }
       additionalDataSources = local.grafana_mimir_datasource
-    }
+    })
 
     prometheus = {
       prometheusSpec = merge(
