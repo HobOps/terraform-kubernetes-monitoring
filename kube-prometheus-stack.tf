@@ -1,4 +1,7 @@
 resource "random_password" "grafana_admin" {
+  # Only when the module manages the password and the caller did not set one.
+  count = local.grafana_admin_from_secret || var.grafana_admin_password != null ? 0 : 1
+
   length  = 24
   special = false
 }
@@ -47,6 +50,8 @@ resource "helm_release" "kube_prometheus_stack" {
   depends_on = [
     kubernetes_namespace.monitoring,
     kubernetes_secret.remote_write_auth,
+    kubectl_manifest.grafana_admin_external_secret,
+    kubectl_manifest.grafana_google_auth_external_secret,
   ]
 
   lifecycle {
@@ -58,7 +63,7 @@ resource "helm_release" "kube_prometheus_stack" {
       error_message = "grafana_metrics_backend=mimir requires enable_mimir=true or mimir_url."
     }
     precondition {
-      condition     = var.grafana_google_auth == null || var.grafana_hostname != null
+      condition     = !local.grafana_google_auth_enabled || var.grafana_hostname != null
       error_message = "grafana_google_auth requires grafana_hostname (OAuth redirect URL)."
     }
   }
@@ -124,7 +129,9 @@ locals {
 
   # Placeholder when OAuth is off, so attribute reads below never hit null.
   google_auth = var.grafana_google_auth != null ? var.grafana_google_auth : {
+    enabled              = false
     existing_secret      = ""
+    external_secret      = null
     client_id_key        = ""
     client_secret_key    = ""
     allowed_domains      = []
@@ -135,10 +142,11 @@ locals {
     skip_org_role_sync   = true
   }
 
-  # grafana.ini and env for Google OAuth. Credentials come from the caller's
-  # Secret through GF_AUTH_GOOGLE_* env vars, never through values.
+  # grafana.ini and env for Google OAuth. Credentials come from the Secret
+  # (caller-provided or materialized by the ExternalSecret) through
+  # GF_AUTH_GOOGLE_* env vars, never through values.
   # jsonencode/jsondecode: both branches of the conditional must share a type.
-  grafana_google_auth_values = jsondecode(var.grafana_google_auth == null ? "{}" : jsonencode({
+  grafana_google_auth_values = jsondecode(!local.grafana_google_auth_enabled ? "{}" : jsonencode({
     "grafana.ini" = {
       server = {
         root_url = "https://${var.grafana_hostname}"
@@ -163,16 +171,36 @@ locals {
     envValueFrom = {
       GF_AUTH_GOOGLE_CLIENT_ID = {
         secretKeyRef = {
-          name = local.google_auth.existing_secret
+          name = local.grafana_google_auth_secret_name
           key  = local.google_auth.client_id_key
         }
       }
       GF_AUTH_GOOGLE_CLIENT_SECRET = {
         secretKeyRef = {
-          name = local.google_auth.existing_secret
+          name = local.grafana_google_auth_secret_name
           key  = local.google_auth.client_secret_key
         }
       }
+    }
+  }))
+
+  # Admin credentials: admin.existingSecret when they live in a Secret,
+  # otherwise adminPassword (explicit or random).
+  grafana_admin_values = jsondecode(local.grafana_admin_from_secret ? jsonencode({
+    admin = {
+      existingSecret = local.grafana_admin_secret_name
+      userKey        = var.grafana_admin_user_key
+      passwordKey    = var.grafana_admin_password_key
+    }
+    }) : jsonencode({
+    adminPassword = local.grafana_admin_password
+  }))
+
+  # Stakater Reloader annotation so Grafana restarts when a referenced Secret
+  # rotates (e.g. Vault via ExternalSecret). Harmless when Reloader is absent.
+  grafana_reloader_values = jsondecode(length(local.grafana_reloader_secrets) == 0 ? "{}" : jsonencode({
+    podAnnotations = {
+      "secret.reloader.stakater.com/reload" = join(",", local.grafana_reloader_secrets)
     }
   }))
 
@@ -183,24 +211,28 @@ locals {
       enabled = var.enable_alertmanager
     }
 
-    grafana = merge(local.grafana_google_auth_values, {
-      enabled       = true
-      adminPassword = local.grafana_admin_password
-      ingress = {
-        enabled = false
-      }
-      persistence = {
-        enabled = var.grafana_persistence_enabled
-        size    = var.grafana_storage_size
-      }
-      forceDeployDatasources = var.grafana_metrics_backend == "mimir"
-      sidecar = {
-        datasources = {
-          defaultDatasourceEnabled = var.grafana_metrics_backend == "prometheus"
+    grafana = merge(
+      local.grafana_google_auth_values,
+      local.grafana_admin_values,
+      local.grafana_reloader_values,
+      {
+        enabled = true
+        ingress = {
+          enabled = false
         }
-      }
-      additionalDataSources = local.grafana_mimir_datasource
-    })
+        persistence = {
+          enabled = var.grafana_persistence_enabled
+          size    = var.grafana_storage_size
+        }
+        forceDeployDatasources = var.grafana_metrics_backend == "mimir"
+        sidecar = {
+          datasources = {
+            defaultDatasourceEnabled = var.grafana_metrics_backend == "prometheus"
+          }
+        }
+        additionalDataSources = local.grafana_mimir_datasource
+      },
+    )
 
     prometheus = {
       prometheusSpec = merge(

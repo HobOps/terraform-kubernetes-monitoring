@@ -75,22 +75,67 @@ variable "grafana_hostname" {
 }
 
 variable "grafana_admin_password" {
-  description = "Grafana admin password. If null, a random password is generated and exposed via output."
+  description = "Grafana admin password. Ignored when the admin credentials come from a Secret (grafana_admin_existing_secret / grafana_admin_external_secret). If null, a random password is generated and exposed via output."
   type        = string
   default     = null
   sensitive   = true
 }
 
+variable "grafana_admin_existing_secret" {
+  description = "Name of an existing Kubernetes Secret in the monitoring namespace with the Grafana admin credentials (chart admin.existingSecret). The caller provisions it; keys are grafana_admin_user_key / grafana_admin_password_key."
+  type        = string
+  default     = null
+}
+
+variable "grafana_admin_external_secret" {
+  description = <<-EOT
+    Create an ExternalSecret that materializes the Grafana admin credentials
+    Secret from Vault through a ClusterSecretStore (External Secrets Operator
+    must already be installed). Takes precedence over
+    grafana_admin_existing_secret and grafana_admin_password. The Vault key
+    must expose the username/password under grafana_admin_user_key /
+    grafana_admin_password_key. null disables it.
+  EOT
+  type = object({
+    cluster_secret_store = string
+    vault_key            = string
+    secret_name          = string
+    refresh_interval     = optional(string, "1h")
+  })
+  default = null
+}
+
+variable "grafana_admin_user_key" {
+  description = "Key in the Grafana admin Secret that holds the admin username."
+  type        = string
+  default     = "username"
+}
+
+variable "grafana_admin_password_key" {
+  description = "Key in the Grafana admin Secret that holds the admin password."
+  type        = string
+  default     = "password"
+}
+
 variable "grafana_google_auth" {
   description = <<-EOT
     Google OAuth login for Grafana. null disables it. The client ID and secret
-    come from an existing Secret in the monitoring namespace (keys
-    client_id_key / client_secret_key); the module never sees them. Requires
-    grafana_hostname (used as root_url for the OAuth redirect:
-    https://<grafana_hostname>/login/google).
+    come from a Kubernetes Secret in the monitoring namespace (keys
+    client_id_key / client_secret_key): either existing_secret (a Secret the
+    caller provisions) or external_secret (an ExternalSecret this module
+    creates from Vault through a ClusterSecretStore). The module never sees
+    the values. Requires grafana_hostname (used as root_url for the OAuth
+    redirect: https://<grafana_hostname>/login/google).
   EOT
   type = object({
-    existing_secret      = string
+    enabled         = optional(bool, true)
+    existing_secret = optional(string)
+    external_secret = optional(object({
+      cluster_secret_store = string
+      vault_key            = string
+      secret_name          = string
+      refresh_interval     = optional(string, "1h")
+    }))
     client_id_key        = optional(string, "client-id")
     client_secret_key    = optional(string, "client-secret")
     allowed_domains      = optional(list(string), [])
@@ -108,6 +153,16 @@ variable "grafana_google_auth" {
       try(var.grafana_google_auth.auto_assign_org_role, "Viewer"),
     )
     error_message = "grafana_google_auth.auto_assign_org_role must be Viewer, Editor or Admin."
+  }
+
+  validation {
+    condition = (
+      var.grafana_google_auth == null ||
+      !try(var.grafana_google_auth.enabled, true) ||
+      try(var.grafana_google_auth.external_secret, null) != null ||
+      try(var.grafana_google_auth.existing_secret, null) != null
+    )
+    error_message = "grafana_google_auth needs existing_secret or external_secret when enabled."
   }
 }
 
@@ -274,7 +329,33 @@ locals {
     smartctl_exporter     = coalesce(try(var.chart_versions.smartctl_exporter, null), "0.17.1")
   }
 
-  grafana_admin_password = coalesce(var.grafana_admin_password, random_password.grafana_admin.result)
+  # Grafana admin credentials: ExternalSecret > existing Secret > explicit password > random.
+  grafana_admin_from_secret = var.grafana_admin_external_secret != null || var.grafana_admin_existing_secret != null
+
+  grafana_admin_secret_name = (
+    var.grafana_admin_external_secret != null
+    ? var.grafana_admin_external_secret.secret_name
+    : var.grafana_admin_existing_secret
+  )
+
+  grafana_admin_password = local.grafana_admin_from_secret ? null : coalesce(
+    var.grafana_admin_password,
+    try(random_password.grafana_admin[0].result, null),
+  )
+
+  grafana_google_auth_enabled = var.grafana_google_auth != null && try(var.grafana_google_auth.enabled, true)
+
+  grafana_google_auth_secret_name = local.grafana_google_auth_enabled ? try(coalesce(
+    try(var.grafana_google_auth.external_secret.secret_name, null),
+    try(var.grafana_google_auth.existing_secret, null),
+  ), null) : null
+
+  # Secrets Grafana reads at start-up. Stakater Reloader, when installed,
+  # restarts the pod on rotation (annotation on the Grafana Deployment).
+  grafana_reloader_secrets = [
+    for name in [local.grafana_admin_secret_name, local.grafana_google_auth_secret_name] : name
+    if name != null
+  ]
 
   mimir_query_url = var.mimir_url != null ? var.mimir_url : (
     var.enable_mimir ? "http://mimir-nginx.${var.mimir_namespace}.svc.cluster.local/prometheus" : null

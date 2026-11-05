@@ -22,7 +22,9 @@ caller-configured `grafana` provider — keeping the dependency graph acyclic.
 | `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged root + `/dev`) |
 | `enable_smartctl_exporter` | prometheus-smartctl-exporter (DaemonSet; disk SMART) |
 | `grafana_hostname` | Gateway API HTTPRoute to Grafana |
-| `grafana_google_auth` | Grafana login with Google OAuth (credentials from an existing Secret) |
+| `grafana_admin_existing_secret` | Grafana admin credentials from an existing Secret (instead of a password) |
+| `grafana_admin_external_secret` | Grafana admin credentials from Vault via an ExternalSecret |
+| `grafana_google_auth` | Grafana login with Google OAuth (credentials from an existing Secret or from Vault via an ExternalSecret) |
 | `remote_write_url` | Prometheus remote_write to a central Mimir (or other backend) |
 
 > **metrics-server:** not installed by this module. On k3s it usually ships in
@@ -35,12 +37,31 @@ Set `grafana_metrics_backend` to:
 - **`prometheus`** (default) — in-cluster Prometheus is Grafana’s default datasource.
 - **`mimir`** — Mimir is the default datasource; requires `enable_mimir = true` or `mimir_url`.
 
+## Grafana admin credentials
+
+By default the module sets the admin password (`grafana_admin_password`, or a
+random one exposed through the `grafana_admin_password` output). To keep the
+credentials out of Terraform state, point the chart at a Secret instead:
+
+- `grafana_admin_existing_secret`: a Secret the caller provisions in the
+  monitoring namespace (keys `grafana_admin_user_key` /
+  `grafana_admin_password_key`, default `username` / `password`).
+- `grafana_admin_external_secret`: the module creates an **ExternalSecret**
+  that materializes that Secret from Vault through a `ClusterSecretStore`
+  (see [Grafana credentials from Vault](#grafana-credentials-from-vault-external-secrets)).
+
+With either option `random_password` is not created and the
+`grafana_admin_password` output is null; `grafana_admin_secret_name` tells
+callers which Secret to read.
+
 ## Grafana login with Google
 
 `grafana_google_auth` turns on Grafana's Google OAuth login. The client ID and
-secret stay in a Secret that the caller creates in the monitoring namespace;
-the module only references it (`GF_AUTH_GOOGLE_CLIENT_ID` /
-`GF_AUTH_GOOGLE_CLIENT_SECRET` env vars), so they never appear in Helm values.
+secret stay in a Secret in the monitoring namespace, either one the caller
+creates (`existing_secret`) or one the module materializes from Vault
+(`external_secret`); the module only references it (`GF_AUTH_GOOGLE_CLIENT_ID`
+/ `GF_AUTH_GOOGLE_CLIENT_SECRET` env vars), so the values never appear in
+Helm values.
 
 ```hcl
 resource "kubernetes_secret" "grafana_google_auth" {
@@ -74,6 +95,53 @@ module "monitoring" {
 - One apply on a fresh cluster: the `namespace` output comes from the
   module's namespace resource, so the Secret is created after the namespace
   and, through `existing_secret`, before the Helm release.
+- `enabled = false` keeps the block in place but turns the login off.
+
+## Grafana credentials from Vault (External Secrets)
+
+When the cluster runs the External Secrets Operator with a `ClusterSecretStore`
+backed by Vault (for example from
+[`terraform-kubernetes-bootstrap`](https://github.com/HobOps/terraform-kubernetes-bootstrap)),
+the module can create the ExternalSecrets itself, so no credential ever goes
+through Terraform variables or state:
+
+```hcl
+module "monitoring" {
+  # ...
+  grafana_hostname = "grafana.c1.example.com"
+
+  # Vault key with `username` / `password` properties.
+  grafana_admin_external_secret = {
+    cluster_secret_store = "vault-infra"
+    vault_key            = "grafana/credentials"
+    secret_name          = "grafana-admin"
+    refresh_interval     = "2m"
+  }
+
+  # Vault key with `client-id` / `client-secret` properties.
+  grafana_google_auth = {
+    external_secret = {
+      cluster_secret_store = "vault-infra"
+      vault_key            = "grafana/oidc-google"
+      secret_name          = "grafana-auth-google"
+      refresh_interval     = "2m"
+    }
+    allowed_domains = ["example.com"]
+    hosted_domain   = "example.com"
+  }
+}
+```
+
+- The ExternalSecrets are created in the monitoring namespace and the Helm
+  release waits for them to become `Ready`, so a missing Vault key fails the
+  apply instead of starting Grafana with empty credentials.
+- `grafana_admin_user_key` / `grafana_admin_password_key` name the properties
+  read from the admin Vault key; the Google key is copied as a whole and read
+  with `client_id_key` / `client_secret_key`.
+- Whenever Grafana reads a Secret (existing or ExternalSecret), the Deployment
+  gets the `secret.reloader.stakater.com/reload` annotation, so
+  [Stakater Reloader](https://github.com/stakater/Reloader) restarts Grafana
+  on rotation. Without Reloader the annotation is inert.
 
 ## Extra kube-prometheus-stack values
 
@@ -87,7 +155,8 @@ retention, storage and selectors.
 
 | Component | Depends on | Why |
 |-----------|------------|-----|
-| **kube-prometheus-stack** | monitoring namespace (+ remote_write auth secret when used) | Helm `create_namespace=false`; namespace managed in-module |
+| **kube-prometheus-stack** | monitoring namespace (+ remote_write auth secret and Grafana ExternalSecrets when used) | Helm `create_namespace=false`; namespace managed in-module; Grafana must find its Secrets at start |
+| **Grafana ExternalSecrets** | monitoring namespace + External Secrets Operator with the named `ClusterSecretStore` (caller) | Materialize admin / Google OAuth Secrets from Vault |
 | **Grafana HTTPRoute** | kube-prometheus-stack + shared Gateway | Backend service must exist |
 | **Mimir** | — | Independent Helm release in `mimir_namespace` |
 
@@ -133,7 +202,10 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 
 | Name | Description |
 |------|-------------|
-| `grafana_admin_password` | Admin password (sensitive; generated if not set) |
+| `grafana_admin_password` | Admin password (sensitive; generated if not set; null when it lives in a Secret) |
+| `grafana_admin_secret_name` | Secret with the admin credentials, when configured |
+| `grafana_google_auth_secret_name` | Secret with the Google OAuth client credentials, when configured |
+| `namespace` | Monitoring namespace (from the namespace resource) |
 | `grafana_hostname` | Public hostname when HTTPRoute is enabled |
 | `mimir_query_url` | In-cluster or external Mimir query URL when configured |
 | `chart_versions` | Resolved Helm chart versions |
