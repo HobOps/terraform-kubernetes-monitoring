@@ -299,11 +299,14 @@ variable "smartctl_exporter_values" {
 variable "chart_versions" {
   description = "Helm chart versions. Omitted keys use module defaults."
   type = object({
-    kube_prometheus_stack = optional(string)
-    mimir_distributed     = optional(string)
-    blackbox_exporter     = optional(string)
-    ipmi_exporter         = optional(string)
-    smartctl_exporter     = optional(string)
+    kube_prometheus_stack  = optional(string)
+    mimir_distributed      = optional(string)
+    blackbox_exporter      = optional(string)
+    ipmi_exporter          = optional(string)
+    smartctl_exporter      = optional(string)
+    opentelemetry_operator = optional(string)
+    loki                   = optional(string)
+    tempo                  = optional(string)
   })
   default = {}
 }
@@ -322,11 +325,14 @@ variable "mimir_values" {
 
 locals {
   chart_versions = {
-    kube_prometheus_stack = coalesce(try(var.chart_versions.kube_prometheus_stack, null), "87.15.1")
-    mimir_distributed     = coalesce(try(var.chart_versions.mimir_distributed, null), "6.1.0")
-    blackbox_exporter     = coalesce(try(var.chart_versions.blackbox_exporter, null), "11.15.1")
-    ipmi_exporter         = coalesce(try(var.chart_versions.ipmi_exporter, null), "0.8.0")
-    smartctl_exporter     = coalesce(try(var.chart_versions.smartctl_exporter, null), "0.17.1")
+    kube_prometheus_stack  = coalesce(try(var.chart_versions.kube_prometheus_stack, null), "87.15.1")
+    mimir_distributed      = coalesce(try(var.chart_versions.mimir_distributed, null), "6.1.0")
+    blackbox_exporter      = coalesce(try(var.chart_versions.blackbox_exporter, null), "11.15.1")
+    ipmi_exporter          = coalesce(try(var.chart_versions.ipmi_exporter, null), "0.8.0")
+    smartctl_exporter      = coalesce(try(var.chart_versions.smartctl_exporter, null), "0.17.1")
+    opentelemetry_operator = coalesce(try(var.chart_versions.opentelemetry_operator, null), "0.129.0")
+    loki                   = coalesce(try(var.chart_versions.loki, null), "21.0.0")
+    tempo                  = coalesce(try(var.chart_versions.tempo, null), "3.2.1")
   }
 
   # Grafana admin credentials: ExternalSecret > existing Secret > explicit password > random.
@@ -368,4 +374,367 @@ locals {
   service_monitor_labels = {
     release = local.release_name
   }
+}
+
+# --- OpenTelemetry (operator, collectors, instrumentation) ---
+
+variable "enable_otel_operator" {
+  description = "Install the OpenTelemetry Operator (reconciles OpenTelemetryCollector / Instrumentation CRs). Its webhooks need cert-manager in the cluster."
+  type        = bool
+  default     = false
+}
+
+variable "otel_operator_resources" {
+  description = "Requests/limits for the operator manager container."
+  type = object({
+    requests = optional(map(string), { cpu = "50m", memory = "128Mi" })
+    limits   = optional(map(string), { cpu = "500m", memory = "256Mi" })
+  })
+  default = {}
+}
+
+variable "otel_operator_values" {
+  description = "Extra values for opentelemetry-operator, deep-merged by Helm on top of the module defaults."
+  type        = any
+  default     = {}
+}
+
+variable "enable_otel_collector" {
+  description = "Create the OTel Collector agent (DaemonSet: container logs) and gateway (Deployment: OTLP 4317/4318 for apps). Requires enable_otel_operator and at least one backend (Loki, Tempo or the Prometheus OTLP receiver)."
+  type        = bool
+  default     = false
+}
+
+variable "otel_agent_kubeletstats_enabled" {
+  description = "Also scrape kubelet pod/container/node stats from the agent and ship them to Prometheus over OTLP. Off by default: kube-prometheus-stack already scrapes cAdvisor, so this mostly duplicates series."
+  type        = bool
+  default     = false
+}
+
+variable "otel_agent_log_exclude" {
+  description = "Extra /var/log/pods globs the agent skips (the collectors' own logs are always skipped)."
+  type        = list(string)
+  default     = []
+}
+
+variable "otel_agent_resources" {
+  description = "Requests/limits for each agent pod (one per node)."
+  type = object({
+    requests = optional(map(string), { cpu = "100m", memory = "256Mi" })
+    limits   = optional(map(string), { cpu = "500m", memory = "512Mi" })
+  })
+  default = {}
+}
+
+variable "otel_gateway_replicas" {
+  description = "Gateway replicas."
+  type        = number
+  default     = 1
+}
+
+variable "otel_gateway_resources" {
+  description = "Requests/limits for each gateway pod."
+  type = object({
+    requests = optional(map(string), { cpu = "200m", memory = "512Mi" })
+    limits   = optional(map(string), { cpu = "1", memory = "1Gi" })
+  })
+  default = {}
+}
+
+variable "enable_otel_instrumentation" {
+  description = "Create the Instrumentation CR the apps reference with instrumentation.opentelemetry.io/inject-<lang>: \"<namespace>/<name>\". Requires enable_otel_collector."
+  type        = bool
+  default     = false
+}
+
+variable "otel_instrumentation" {
+  description = "Instrumentation CR settings. env applies to every language; *_env to one. The module always sets OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf, OTEL_LOGS_EXPORTER=none and, for Python, OTEL_PYTHON_LOG_CORRELATION=true (override them here)."
+  type = object({
+    name             = optional(string, "default")
+    sampler_type     = optional(string, "parentbased_traceidratio")
+    sampler_argument = optional(string, "1.0")
+    propagators      = optional(list(string), ["tracecontext", "baggage"])
+    env              = optional(map(string), {})
+    python_env       = optional(map(string), {})
+    nodejs_env       = optional(map(string), {})
+    java_env         = optional(map(string), {})
+  })
+  default = {}
+}
+
+# --- Loki ---
+
+variable "enable_loki" {
+  description = "Install Loki (single-binary) in the monitoring namespace."
+  type        = bool
+  default     = false
+}
+
+variable "loki_storage" {
+  description = "Where Loki keeps chunks and index: filesystem (PVC only), gcs or s3 (bucket required). GCS auth is ADC (GKE Workload Identity bound to the ServiceAccount <namespace>/loki, or a mounted key via loki_values). S3 keys go in loki_s3_credentials."
+  type = object({
+    backend = optional(string, "filesystem")
+    bucket  = optional(string)
+    s3 = optional(object({
+      endpoint         = optional(string)
+      region           = optional(string)
+      force_path_style = optional(bool, false)
+      insecure         = optional(bool, false)
+    }))
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["filesystem", "gcs", "s3"], var.loki_storage.backend)
+    error_message = "loki_storage.backend must be filesystem, gcs or s3."
+  }
+}
+
+variable "loki_s3_credentials" {
+  description = "Static S3 credentials for loki_storage.backend = s3 (null to rely on the platform identity)."
+  type = object({
+    access_key_id     = string
+    secret_access_key = string
+  })
+  default   = null
+  sensitive = true
+}
+
+variable "loki_retention_period" {
+  description = "How long Loki keeps logs (compactor retention), e.g. 720h = 30 days."
+  type        = string
+  default     = "720h"
+}
+
+variable "loki_ingestion_rate_mb" {
+  description = "Per-tenant ingestion rate limit in MB/s (burst is twice this)."
+  type        = number
+  default     = 8
+}
+
+variable "loki_storage_size" {
+  description = "PVC size for the Loki single-binary pod (WAL, index cache; chunks too when backend = filesystem)."
+  type        = string
+  default     = "10Gi"
+}
+
+variable "loki_resources" {
+  description = "Requests/limits for the Loki pod."
+  type = object({
+    requests = optional(map(string), { cpu = "200m", memory = "512Mi" })
+    limits   = optional(map(string), { cpu = "1", memory = "1536Mi" })
+  })
+  default = {}
+}
+
+variable "loki_service_account_annotations" {
+  description = "Annotations for the Loki ServiceAccount (e.g. iam.gke.io/gcp-service-account or eks.amazonaws.com/role-arn). Not needed with GKE Workload Identity principal:// bindings."
+  type        = map(string)
+  default     = {}
+}
+
+variable "loki_values" {
+  description = "Extra values for the loki chart, deep-merged by Helm on top of the module defaults."
+  type        = any
+  default     = {}
+}
+
+# --- Tempo ---
+
+variable "enable_tempo" {
+  description = "Install Tempo (monolithic) in the monitoring namespace."
+  type        = bool
+  default     = false
+}
+
+variable "tempo_storage" {
+  description = "Where Tempo keeps trace blocks: local (PVC only), gcs or s3 (bucket required). Same auth notes as loki_storage; the ServiceAccount is <namespace>/tempo."
+  type = object({
+    backend = optional(string, "local")
+    bucket  = optional(string)
+    s3 = optional(object({
+      endpoint         = optional(string)
+      region           = optional(string)
+      force_path_style = optional(bool, false)
+      insecure         = optional(bool, false)
+    }))
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["local", "gcs", "s3"], var.tempo_storage.backend)
+    error_message = "tempo_storage.backend must be local, gcs or s3."
+  }
+}
+
+variable "tempo_s3_credentials" {
+  description = "Static S3 credentials for tempo_storage.backend = s3 (null to rely on the platform identity)."
+  type = object({
+    access_key_id     = string
+    secret_access_key = string
+  })
+  default   = null
+  sensitive = true
+}
+
+variable "tempo_retention" {
+  description = "How long Tempo keeps trace blocks, e.g. 336h = 14 days."
+  type        = string
+  default     = "336h"
+}
+
+variable "tempo_storage_size" {
+  description = "PVC size for the Tempo pod (WAL and local blocks before upload; everything when backend = local)."
+  type        = string
+  default     = "10Gi"
+}
+
+variable "tempo_metrics_generator_enabled" {
+  description = "Derive RED metrics (span-metrics) and the service graph from traces and remote-write them to the in-cluster Prometheus."
+  type        = bool
+  default     = true
+}
+
+variable "tempo_resources" {
+  description = "Requests/limits for the Tempo pod."
+  type = object({
+    requests = optional(map(string), { cpu = "200m", memory = "768Mi" })
+    limits   = optional(map(string), { cpu = "1", memory = "1536Mi" })
+  })
+  default = {}
+}
+
+variable "tempo_service_account_annotations" {
+  description = "Annotations for the Tempo ServiceAccount (see loki_service_account_annotations)."
+  type        = map(string)
+  default     = {}
+}
+
+variable "tempo_values" {
+  description = "Extra values for the tempo chart, deep-merged by Helm on top of the module defaults."
+  type        = any
+  default     = {}
+}
+
+# --- Prometheus receivers / Grafana datasources for the OTel stack ---
+
+variable "prometheus_otlp_receiver_enabled" {
+  description = "Enable Prometheus' OTLP receiver (/api/v1/otlp). Defaults to enable_otel_collector."
+  type        = bool
+  default     = null
+}
+
+variable "prometheus_remote_write_receiver_enabled" {
+  description = "Enable Prometheus' remote-write receiver (/api/v1/write). Defaults to enable_tempo && tempo_metrics_generator_enabled."
+  type        = bool
+  default     = null
+}
+
+variable "prometheus_otlp_promote_resource_attributes" {
+  description = "OTLP resource attributes Prometheus promotes to metric labels."
+  type        = list(string)
+  default = [
+    "service.name",
+    "service.namespace",
+    "service.instance.id",
+    "deployment.environment",
+    "k8s.cluster.name",
+    "k8s.namespace.name",
+    "k8s.pod.name",
+    "k8s.container.name",
+    "k8s.deployment.name",
+  ]
+}
+
+variable "grafana_provision_otel_datasources" {
+  description = "Provision Loki and Tempo datasources in Grafana (with trace/log/metric correlation) when those components are enabled. Set false to manage them elsewhere (e.g. the grafana Terraform provider)."
+  type        = bool
+  default     = true
+}
+
+variable "grafana_metrics_datasource_uid" {
+  description = "UID of the Prometheus-compatible datasource Tempo uses for the service map and span metrics (kube-prometheus-stack provisions 'prometheus')."
+  type        = string
+  default     = "prometheus"
+}
+
+locals {
+  otel_collector_enabled = var.enable_otel_operator && var.enable_otel_collector
+
+  otel_agent_name   = "otel-agent"
+  otel_gateway_name = "otel-gateway"
+  # The operator names the Service <cr-name>-collector.
+  otel_gateway_service   = "${local.otel_gateway_name}-collector.${var.namespace}.svc.cluster.local"
+  otel_gateway_otlp_grpc = "${local.otel_gateway_service}:4317"
+  otel_gateway_otlp_http = "http://${local.otel_gateway_service}:4318"
+
+  loki_url        = var.enable_loki ? "http://loki.${var.namespace}.svc.cluster.local:3100" : null
+  tempo_url       = var.enable_tempo ? "http://tempo.${var.namespace}.svc.cluster.local:3200" : null
+  tempo_otlp_grpc = "tempo.${var.namespace}.svc.cluster.local:4317"
+  prometheus_url  = "http://${local.release_name}-prometheus.${var.namespace}.svc.cluster.local:9090"
+
+  prometheus_otlp_receiver_enabled         = coalesce(var.prometheus_otlp_receiver_enabled, local.otel_collector_enabled)
+  prometheus_remote_write_receiver_enabled = coalesce(var.prometheus_remote_write_receiver_enabled, var.enable_tempo && var.tempo_metrics_generator_enabled)
+
+  # Grafana datasources with correlation: Loki log lines carrying trace_id=<id>
+  # link to Tempo; Tempo spans link back to Loki (by service name and trace id)
+  # and to the metrics datasource for the service map / span metrics.
+  grafana_otel_datasources = concat(
+    var.grafana_provision_otel_datasources && var.enable_loki ? [
+      {
+        name   = "Loki"
+        type   = "loki"
+        uid    = "loki"
+        access = "proxy"
+        url    = local.loki_url
+        jsonData = {
+          derivedFields = [
+            {
+              name            = "TraceID"
+              matcherType     = "regex"
+              matcherRegex    = "(?:trace_id|traceID|traceId)[=:\\s\"]+([0-9a-fA-F]{16,32})"
+              url             = "$${__value.raw}"
+              urlDisplayLabel = "Trace"
+              datasourceUid   = "tempo"
+            },
+          ]
+        }
+      },
+    ] : [],
+    var.grafana_provision_otel_datasources && var.enable_tempo ? [
+      {
+        name   = "Tempo"
+        type   = "tempo"
+        uid    = "tempo"
+        access = "proxy"
+        url    = local.tempo_url
+        jsonData = {
+          tracesToLogsV2 = {
+            datasourceUid      = "loki"
+            spanStartTimeShift = "-1h"
+            spanEndTimeShift   = "1h"
+            filterByTraceID    = true
+            filterBySpanID     = false
+            tags = [
+              { key = "service.name", value = "service_name" },
+            ]
+          }
+          tracesToMetrics = {
+            datasourceUid      = var.grafana_metrics_datasource_uid
+            spanStartTimeShift = "-1h"
+            spanEndTimeShift   = "1h"
+          }
+          serviceMap = {
+            datasourceUid = var.grafana_metrics_datasource_uid
+          }
+          nodeGraph = {
+            enabled = true
+          }
+          lokiSearch = {
+            datasourceUid = "loki"
+          }
+        }
+      },
+    ] : [],
+  )
 }

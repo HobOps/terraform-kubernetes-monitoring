@@ -8,6 +8,12 @@ locals {
 
   enable_mimir = false
 
+  enable_otel_operator        = false
+  enable_otel_collector       = false
+  enable_otel_instrumentation = false
+  enable_loki                 = false
+  enable_tempo                = false
+
   prometheus_retention      = "15d"
   prometheus_retention_size = "20GB"
 
@@ -17,10 +23,13 @@ locals {
   blackbox_targets         = []
 
   chart_versions = {
-    kube_prometheus_stack = "87.15.1"
-    mimir_distributed     = "6.1.0"
-    blackbox_exporter     = "11.15.1"
-    ipmi_exporter         = "0.8.0"
-    smartctl_exporter     = "0.17.1"
+    kube_prometheus_stack  = "87.15.1"
+    mimir_distributed      = "6.1.0"
+    blackbox_exporter      = "11.15.1"
+    ipmi_exporter          = "0.8.0"
+    smartctl_exporter      = "0.17.1"
+    opentelemetry_operator = "0.129.0"
+    loki                   = "21.0.0"
+    tempo                  = "3.2.1"
   }
 }

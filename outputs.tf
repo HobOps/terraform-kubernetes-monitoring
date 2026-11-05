@@ -53,3 +53,28 @@ output "chart_versions" {
   description = "Resolved Helm chart versions."
   value       = local.chart_versions
 }
+
+output "otel_gateway_endpoint_grpc" {
+  description = "In-cluster OTLP gRPC endpoint of the collector gateway (null when disabled)."
+  value       = local.otel_collector_enabled ? local.otel_gateway_otlp_grpc : null
+}
+
+output "otel_gateway_endpoint_http" {
+  description = "In-cluster OTLP HTTP endpoint of the collector gateway (null when disabled)."
+  value       = local.otel_collector_enabled ? local.otel_gateway_otlp_http : null
+}
+
+output "otel_instrumentation_name" {
+  description = "<namespace>/<name> to reference in instrumentation.opentelemetry.io/inject-* annotations (null when disabled)."
+  value       = var.enable_otel_operator && var.enable_otel_instrumentation ? "${var.namespace}/${var.otel_instrumentation.name}" : null
+}
+
+output "loki_url" {
+  description = "In-cluster Loki URL (null when disabled)."
+  value       = local.loki_url
+}
+
+output "tempo_url" {
+  description = "In-cluster Tempo URL (null when disabled)."
+  value       = local.tempo_url
+}

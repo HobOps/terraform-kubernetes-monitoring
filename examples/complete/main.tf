@@ -10,6 +10,12 @@ module "monitoring" {
 
   enable_mimir = local.enable_mimir
 
+  enable_otel_operator        = local.enable_otel_operator
+  enable_otel_collector       = local.enable_otel_collector
+  enable_otel_instrumentation = local.enable_otel_instrumentation
+  enable_loki                 = local.enable_loki
+  enable_tempo                = local.enable_tempo
+
   prometheus_retention      = local.prometheus_retention
   prometheus_retention_size = local.prometheus_retention_size
 
