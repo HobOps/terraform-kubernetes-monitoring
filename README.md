@@ -26,6 +26,9 @@ caller-configured `grafana` provider — keeping the dependency graph acyclic.
 | `grafana_admin_external_secret` | Grafana admin credentials from Vault via an ExternalSecret |
 | `grafana_google_auth` | Grafana login with Google OAuth (credentials from an existing Secret or from Vault via an ExternalSecret) |
 | `remote_write_url` | Prometheus remote_write to a central Mimir (or other backend) |
+| `enable_otel_operator` / `enable_otel_collector` / `enable_otel_instrumentation` | OpenTelemetry Operator, Collector agent (logs) + gateway (OTLP), `Instrumentation` CR for auto-instrumentation |
+| `enable_loki` | Grafana Loki single-binary (logs; GCS / S3 / PVC) |
+| `enable_tempo` | Grafana Tempo monolithic (traces; metrics-generator → Prometheus) |
 
 > **metrics-server:** not installed by this module. On k3s it usually ships in
 > `kube-system`; elsewhere install it only if you need `kubectl top` / HPA.
@@ -143,6 +146,75 @@ module "monitoring" {
   [Stakater Reloader](https://github.com/stakater/Reloader) restarts Grafana
   on rotation. Without Reloader the annotation is inert.
 
+## OpenTelemetry, Loki and Tempo
+
+Optional observability stack next to kube-prometheus-stack, all in `namespace`:
+
+| Input | What it installs |
+|-------|------------------|
+| `enable_otel_operator` | OpenTelemetry Operator. Its admission webhooks take their certificate from **cert-manager**, which must already be installed |
+| `enable_otel_collector` | `otel-agent` DaemonSet (every container log under `/var/log/pods`, tagged with namespace/pod/workload; kubelet stats optional) and `otel-gateway` Deployment (OTLP gRPC `4317` / HTTP `4318` for the apps). The gateway fans out traces → Tempo, logs → Loki, metrics → Prometheus OTLP receiver |
+| `enable_otel_instrumentation` | `Instrumentation` CR (`<namespace>/default`) for Python, Node.js and Java auto-instrumentation, pointing at the gateway |
+| `enable_loki` | Loki single-binary: OTLP ingestion, retention `loki_retention_period`, storage `loki_storage` |
+| `enable_tempo` | Tempo monolithic: retention `tempo_retention`, storage `tempo_storage`, metrics-generator (RED span metrics + service graph) remote-written to Prometheus |
+
+Prometheus gets `enableOTLPReceiver` when the collector is on and
+`enableRemoteWriteReceiver` when Tempo's metrics-generator is on (override with
+`prometheus_otlp_receiver_enabled` / `prometheus_remote_write_receiver_enabled`).
+With `grafana_provision_otel_datasources` (default `true`) Grafana gets `Loki` and
+`Tempo` datasources (uids `loki` / `tempo`) with trace ↔ log ↔ metric correlation:
+`derivedFields` on `trace_id=<id>` in log lines, `tracesToLogsV2`, `serviceMap` and
+`nodeGraph` on the metrics datasource (`grafana_metrics_datasource_uid`).
+
+Example with GCS buckets through GKE Workload Identity (IAM granted straight to the
+Kubernetes ServiceAccounts `<namespace>/loki` and `<namespace>/tempo`, no keys):
+
+```hcl
+  enable_otel_operator        = true
+  enable_otel_collector       = true
+  enable_otel_instrumentation = true
+
+  enable_loki           = true
+  loki_storage          = { backend = "gcs", bucket = "my-project-loki" }
+  loki_retention_period = "720h" # 30 days
+
+  enable_tempo    = true
+  tempo_storage   = { backend = "gcs", bucket = "my-project-tempo" }
+  tempo_retention = "336h" # 14 days
+```
+
+Loki and Tempo charts come from the maintained `grafana-community` repository
+(the `grafana.github.io` ones are frozen since January 2026).
+
+Storage backends: `filesystem` / `local` (PVC only, the default), `gcs` (Application
+Default Credentials: Workload Identity on GKE, or a key mounted via `*_values`) and
+`s3` (`loki_s3_credentials` / `tempo_s3_credentials`; MinIO works with
+`force_path_style = true`). Retention is enforced by Loki and Tempo themselves: do
+not add bucket lifecycle rules shorter than it.
+
+To instrument a Deployment, annotate its pods and name the service; the image does
+not change (the operator adds an init container that ships the agent):
+
+```yaml
+podAnnotations:
+  instrumentation.opentelemetry.io/inject-python: "monitoring/default" # or inject-nodejs / inject-java
+env:
+  - name: OTEL_SERVICE_NAME
+    value: my-service
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: deployment.environment=dev,service.namespace=my-app
+```
+
+The `Instrumentation` sets `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`,
+`OTEL_LOGS_EXPORTER=none` (stdout logs are already shipped by the agent) and, for
+Python, `OTEL_PYTHON_LOG_CORRELATION=true` so text logs carry `trace_id`/`span_id`.
+Apps that speak OTLP themselves use the `otel_gateway_endpoint_*` outputs.
+
+Sizing defaults are deliberately small (requests: agent 256Mi per node, gateway
+512Mi, Loki 512Mi, Tempo 768Mi, operator 128Mi); tune with `otel_agent_resources`,
+`otel_gateway_resources`, `loki_resources`, `tempo_resources`. Memcached caches,
+the Loki canary and the nginx gateway are off.
+
 ## Extra kube-prometheus-stack values
 
 `kube_prometheus_stack_values` is passed to Helm as a second values document,
@@ -159,6 +231,9 @@ retention, storage and selectors.
 | **Grafana ExternalSecrets** | monitoring namespace + External Secrets Operator with the named `ClusterSecretStore` (caller) | Materialize admin / Google OAuth Secrets from Vault |
 | **Grafana HTTPRoute** | kube-prometheus-stack + shared Gateway | Backend service must exist |
 | **Mimir** | — | Independent Helm release in `mimir_namespace` |
+| **OpenTelemetry Operator** | monitoring namespace + kube-prometheus-stack (ServiceMonitor CRD) + cert-manager (caller) | Webhook TLS certificate; self-monitoring |
+| **OTel collectors / Instrumentation** | operator (CRDs), in-module RBAC, Loki / Tempo when enabled | Exporters target them |
+| **Loki / Tempo** | monitoring namespace + kube-prometheus-stack (ServiceMonitor CRD; Prometheus is Tempo's remote-write target) | Object-storage credentials come from the platform identity or `*_s3_credentials` |
 
 For a public Grafana URL, the caller typically needs a **Gateway** (for example from
 [`terraform-kubernetes-bootstrap`](https://github.com/HobOps/terraform-kubernetes-bootstrap))
@@ -209,6 +284,9 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 | `grafana_hostname` | Public hostname when HTTPRoute is enabled |
 | `mimir_query_url` | In-cluster or external Mimir query URL when configured |
 | `chart_versions` | Resolved Helm chart versions |
+| `otel_gateway_endpoint_grpc` / `otel_gateway_endpoint_http` | In-cluster OTLP endpoints of the collector gateway (null when disabled) |
+| `otel_instrumentation_name` | `<namespace>/<name>` for the `inject-*` annotations (null when disabled) |
+| `loki_url` / `tempo_url` | In-cluster query URLs (null when disabled) |
 
 ## Repository layout
 

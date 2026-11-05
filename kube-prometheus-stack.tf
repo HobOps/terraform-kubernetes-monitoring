@@ -230,7 +230,7 @@ locals {
             defaultDatasourceEnabled = var.grafana_metrics_backend == "prometheus"
           }
         }
-        additionalDataSources = local.grafana_mimir_datasource
+        additionalDataSources = concat(local.grafana_mimir_datasource, local.grafana_otel_datasources)
       },
     )
 
@@ -267,6 +267,18 @@ locals {
         },
         length(local.remote_write) > 0 ? {
           remoteWrite = local.remote_write
+        } : {},
+        # OTLP receiver (/api/v1/otlp) for the OTel gateway; resource attributes
+        # promoted to labels so service.name etc. are queryable.
+        jsondecode(!local.prometheus_otlp_receiver_enabled ? "{}" : jsonencode({
+          enableOTLPReceiver = true
+          otlp = {
+            promoteResourceAttributes = var.prometheus_otlp_promote_resource_attributes
+          }
+        })),
+        # remote-write receiver (/api/v1/write) for Tempo's metrics-generator.
+        local.prometheus_remote_write_receiver_enabled ? {
+          enableRemoteWriteReceiver = true
         } : {},
       )
     }
