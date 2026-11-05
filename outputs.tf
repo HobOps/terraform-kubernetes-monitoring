@@ -19,9 +19,19 @@ output "grafana_hostname" {
 }
 
 output "grafana_admin_password" {
-  description = "Grafana admin password (generated when grafana_admin_password is null)."
+  description = "Grafana admin password when managed by this module (generated when grafana_admin_password is null). Null when the credentials come from a Secret."
   value       = local.grafana_admin_password
   sensitive   = true
+}
+
+output "grafana_admin_secret_name" {
+  description = "Kubernetes Secret holding the Grafana admin credentials, if any (existing or materialized from Vault)."
+  value       = local.grafana_admin_secret_name
+}
+
+output "grafana_google_auth_secret_name" {
+  description = "Kubernetes Secret holding the Google OAuth client credentials, if any (existing or materialized from Vault)."
+  value       = local.grafana_google_auth_secret_name
 }
 
 output "prometheus_retention" {
