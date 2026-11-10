@@ -49,6 +49,21 @@ output "mimir_query_url" {
   value       = local.mimir_query_url
 }
 
+output "mimir_push_url" {
+  description = "Prometheus remote-write URL of the in-cluster Mimir (or remote_write_url when Mimir is external)."
+  value       = local.mimir_push_url
+}
+
+output "mimir_otlp_url" {
+  description = "OTLP/HTTP base URL of the in-cluster Mimir (null when Mimir is not installed here)."
+  value       = local.mimir_otlp_url
+}
+
+output "alloy_enabled" {
+  description = "Whether Grafana Alloy scrapes the cluster and remote-writes to Mimir."
+  value       = var.enable_alloy
+}
+
 output "chart_versions" {
   description = "Resolved Helm chart versions."
   value       = local.chart_versions

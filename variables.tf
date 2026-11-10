@@ -29,7 +29,7 @@ variable "grafana_metrics_backend" {
 }
 
 variable "enable_mimir" {
-  description = "Install Grafana Mimir (central long-term store). Typically true only on the central cluster."
+  description = "Install Grafana Mimir (long-term metrics store). See mimir_storage, mimir_single_replica and mimir_kafka_enabled for a single-cluster install."
   type        = bool
   default     = false
 }
@@ -307,6 +307,7 @@ variable "chart_versions" {
     opentelemetry_operator = optional(string)
     loki                   = optional(string)
     tempo                  = optional(string)
+    alloy                  = optional(string)
   })
   default = {}
 }
@@ -318,7 +319,93 @@ variable "kube_prometheus_stack_values" {
 }
 
 variable "mimir_values" {
-  description = "Extra values merged on top of the module defaults for mimir-distributed."
+  description = "Extra values for mimir-distributed, deep-merged by Helm on top of the module defaults."
+  type        = any
+  default     = {}
+}
+
+variable "mimir_storage" {
+  description = "Mimir object storage. backend: minio (bundled MinIO, default), gcs or s3. bucket is required for gcs/s3; endpoint/region only for s3. With gcs, grant the bucket to the mimir ServiceAccount through Workload Identity (no keys)."
+  type = object({
+    backend  = optional(string, "minio")
+    bucket   = optional(string)
+    endpoint = optional(string)
+    region   = optional(string)
+  })
+  default = {}
+
+  validation {
+    condition     = contains(["minio", "gcs", "s3"], var.mimir_storage.backend)
+    error_message = "mimir_storage.backend must be minio, gcs or s3."
+  }
+}
+
+variable "mimir_kafka_enabled" {
+  description = "Use Mimir's ingest-storage architecture (bundled Kafka, chart default). false = classic architecture: distributors push to ingesters over gRPC, no Kafka (saves ~1 CPU / 1 GiB for a small single-cluster install)."
+  type        = bool
+  default     = true
+}
+
+variable "mimir_multitenancy_enabled" {
+  description = "Require the X-Scope-OrgID header on writes and reads (Mimir default). false = single tenant 'anonymous': Alloy, the OTel gateway, Tempo's metrics-generator and Grafana need no header."
+  type        = bool
+  default     = true
+}
+
+variable "mimir_single_replica" {
+  description = "Run one replica per Mimir component, without zone-aware replication and with replication factor 1 (single cluster, low volume). Also disables Mimir's alertmanager, query-scheduler, overrides-exporter and rollout-operator."
+  type        = bool
+  default     = false
+}
+
+variable "mimir_retention_period" {
+  description = "Blocks retention enforced by Mimir's compactor (e.g. \"395d\"). null keeps blocks forever (Mimir default)."
+  type        = string
+  default     = null
+}
+
+variable "mimir_service_account_annotations" {
+  description = "Annotations for the mimir ServiceAccount (e.g. iam.gke.io/gcp-service-account when using a GSA instead of direct Workload Identity)."
+  type        = map(string)
+  default     = {}
+}
+
+# --- Metrics pipeline (where metrics are stored and who scrapes) ---
+
+variable "metrics_store" {
+  description = "Where the OTel gateway (OTLP from apps) and Tempo's metrics-generator send metrics: prometheus (in-cluster Prometheus receivers) or mimir (in-cluster Mimir, requires enable_mimir)."
+  type        = string
+  default     = "prometheus"
+
+  validation {
+    condition     = contains(["prometheus", "mimir"], var.metrics_store)
+    error_message = "metrics_store must be \"prometheus\" or \"mimir\"."
+  }
+}
+
+variable "prometheus_enabled" {
+  description = "Run the kube-prometheus-stack Prometheus. Set false once Grafana Alloy scrapes and Mimir stores everything: the operator, its CRDs, exporters, rules, Grafana and Alertmanager stay."
+  type        = bool
+  default     = true
+}
+
+variable "enable_alloy" {
+  description = "Install Grafana Alloy as the scraper: discovers the ServiceMonitors/PodMonitors/Probes Prometheus would scrape, syncs PrometheusRules to the Mimir ruler and remote-writes to Mimir (in-cluster when enable_mimir, otherwise remote_write_url)."
+  type        = bool
+  default     = false
+}
+
+variable "alloy_resources" {
+  description = "Requests/limits for the Alloy container."
+  type = object({
+    requests = optional(map(string), { cpu = "100m", memory = "384Mi" })
+    limits   = optional(map(string), { cpu = "1", memory = "1Gi" })
+  })
+  default = {}
+}
+
+variable "alloy_values" {
+  description = "Extra values for the alloy chart, deep-merged by Helm on top of the module defaults."
   type        = any
   default     = {}
 }
@@ -333,6 +420,7 @@ locals {
     opentelemetry_operator = coalesce(try(var.chart_versions.opentelemetry_operator, null), "0.129.0")
     loki                   = coalesce(try(var.chart_versions.loki, null), "21.0.0")
     tempo                  = coalesce(try(var.chart_versions.tempo, null), "3.2.1")
+    alloy                  = coalesce(try(var.chart_versions.alloy, null), "1.15.0")
   }
 
   # Grafana admin credentials: ExternalSecret > existing Secret > explicit password > random.
@@ -363,9 +451,18 @@ locals {
     if name != null
   ]
 
+  # mimir-distributed >= 5 fronts every component with "mimir-gateway" (it used
+  # to be "mimir-nginx").
+  mimir_gateway_url = var.enable_mimir ? "http://mimir-gateway.${var.mimir_namespace}.svc.cluster.local" : null
   mimir_query_url = var.mimir_url != null ? var.mimir_url : (
-    var.enable_mimir ? "http://mimir-nginx.${var.mimir_namespace}.svc.cluster.local/prometheus" : null
+    var.enable_mimir ? "${local.mimir_gateway_url}/prometheus" : null
   )
+  # remote_write target for Alloy and Tempo: the in-cluster Mimir, else remote_write_url.
+  mimir_push_url = var.enable_mimir ? "${local.mimir_gateway_url}/api/v1/push" : var.remote_write_url
+  # OTLP/HTTP base for the OTel gateway (the exporter appends /v1/metrics).
+  mimir_otlp_url = var.enable_mimir ? "${local.mimir_gateway_url}/otlp" : null
+  # Tenant header for writes; harmless when multitenancy is off.
+  mimir_tenant_headers = var.mimir_tenant_id != null ? { "X-Scope-OrgID" = var.mimir_tenant_id } : {}
 
   release_name         = "kube-prometheus-stack"
   grafana_service_name = "${local.release_name}-grafana"
@@ -673,8 +770,11 @@ locals {
   tempo_otlp_grpc = "tempo.${var.namespace}.svc.cluster.local:4317"
   prometheus_url  = "http://${local.release_name}-prometheus.${var.namespace}.svc.cluster.local:9090"
 
-  prometheus_otlp_receiver_enabled         = coalesce(var.prometheus_otlp_receiver_enabled, local.otel_collector_enabled)
-  prometheus_remote_write_receiver_enabled = coalesce(var.prometheus_remote_write_receiver_enabled, var.enable_tempo && var.tempo_metrics_generator_enabled)
+  metrics_to_prometheus = var.metrics_store == "prometheus" && var.prometheus_enabled
+  metrics_to_mimir      = var.metrics_store == "mimir"
+
+  prometheus_otlp_receiver_enabled         = var.prometheus_enabled && coalesce(var.prometheus_otlp_receiver_enabled, local.otel_collector_enabled && local.metrics_to_prometheus)
+  prometheus_remote_write_receiver_enabled = var.prometheus_enabled && coalesce(var.prometheus_remote_write_receiver_enabled, var.enable_tempo && var.tempo_metrics_generator_enabled && local.metrics_to_prometheus)
 
   # Grafana datasources with correlation: Loki log lines carrying trace_id=<id>
   # link to Tempo; Tempo spans link back to Loki (by service name and trace id)
