@@ -17,7 +17,9 @@ caller-configured `grafana` provider — keeping the dependency graph acyclic.
 | Input | Component |
 |-------|-----------|
 | (always) | kube-prometheus-stack (Prometheus, Grafana, optional Alertmanager) |
-| `enable_mimir` | Grafana Mimir (central long-term store; bundled MinIO by default) |
+| `enable_mimir` | Grafana Mimir (long-term store; bundled MinIO by default, GCS/S3 with `mimir_storage`) |
+| `enable_alloy` | Grafana Alloy as the scraper (ServiceMonitors/PodMonitors/Probes, PrometheusRules synced to the Mimir ruler, remote_write to Mimir) |
+| `prometheus_enabled = false` | Turn off the kube-prometheus-stack Prometheus once Mimir stores everything (operator, CRDs, exporters, rules, Grafana and Alertmanager stay) |
 | `enable_blackbox_exporter` | prometheus-blackbox-exporter (+ optional probe targets) |
 | `enable_ipmi_exporter` | prometheus-ipmi-exporter (local OPENIPMI; privileged root + `/dev`) |
 | `enable_smartctl_exporter` | prometheus-smartctl-exporter (DaemonSet; disk SMART) |
@@ -39,6 +41,45 @@ Set `grafana_metrics_backend` to:
 
 - **`prometheus`** (default) — in-cluster Prometheus is Grafana’s default datasource.
 - **`mimir`** — Mimir is the default datasource; requires `enable_mimir = true` or `mimir_url`.
+  It gets the uid in `grafana_metrics_datasource_uid` (`prometheus` by default), the
+  same one kube-prometheus-stack gives its Prometheus datasource, so existing
+  dashboards keep working.
+
+## Mimir as the single metrics store
+
+For one cluster that keeps its own long-term metrics in object storage and no
+longer stores anything in Prometheus:
+
+```hcl
+module "monitoring" {
+  # ...
+  enable_mimir               = true
+  mimir_storage              = { backend = "gcs", bucket = "my-project-mimir" }
+  mimir_single_replica       = true  # 1 replica per component, replication factor 1
+  mimir_kafka_enabled        = false # classic architecture, no bundled Kafka
+  mimir_multitenancy_enabled = false # single tenant: no X-Scope-OrgID anywhere
+  mimir_retention_period     = "395d"
+
+  enable_alloy            = true       # scrapes and syncs rules instead of Prometheus
+  metrics_store           = "mimir"    # OTel gateway + Tempo metrics-generator -> Mimir
+  grafana_metrics_backend = "mimir"    # Grafana datasource (uid "prometheus") -> Mimir
+  prometheus_enabled      = false      # last step
+}
+```
+
+- Grant the bucket to the `mimir` ServiceAccount of `mimir_namespace` (Workload
+  Identity on GKE, no keys), or set `mimir_service_account_annotations`.
+- OTLP ingestion keeps the Prometheus naming (`otel_metric_suffixes_enabled`: unit
+  and `_total` suffixes) and promotes `prometheus_otlp_promote_resource_attributes`
+  to labels, so names and labels match what the Prometheus OTLP receiver produced.
+- The Mimir ruler evaluates the PrometheusRules (synced by Alloy) and sends alerts
+  to the kube-prometheus-stack Alertmanager.
+- Migrating from Prometheus without losing history: enable Mimir and Alloy first
+  (both stores receive the same data while you compare), backfill the Prometheus
+  TSDB blocks into Mimir (`mimirtool backfill`), switch `metrics_store` and
+  `grafana_metrics_backend`, then set `prometheus_enabled = false`.
+- Tempo's metrics-generator cannot send headers, so `metrics_store = "mimir"` with
+  it enabled requires `mimir_multitenancy_enabled = false`.
 
 ## Grafana admin credentials
 
@@ -283,6 +324,8 @@ The **caller** must declare `random` in `required_providers` when using Terrafor
 | `namespace` | Monitoring namespace (from the namespace resource) |
 | `grafana_hostname` | Public hostname when HTTPRoute is enabled |
 | `mimir_query_url` | In-cluster or external Mimir query URL when configured |
+| `mimir_push_url` / `mimir_otlp_url` | In-cluster Mimir remote-write and OTLP/HTTP URLs (push falls back to `remote_write_url`) |
+| `alloy_enabled` | Whether Grafana Alloy is the scraper |
 | `chart_versions` | Resolved Helm chart versions |
 | `otel_gateway_endpoint_grpc` / `otel_gateway_endpoint_http` | In-cluster OTLP endpoints of the collector gateway (null when disabled) |
 | `otel_instrumentation_name` | `<namespace>/<name>` for the `inject-*` annotations (null when disabled) |

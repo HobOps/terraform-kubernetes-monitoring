@@ -4,7 +4,7 @@
 # repository. The metrics-generator derives RED metrics per service
 # (span-metrics) and the service graph, and remote-writes them to the
 # in-cluster Prometheus (which needs enableRemoteWriteReceiver, see
-# kube-prometheus-stack.tf). ClusterIP only.
+# kube-prometheus-stack.tf) or to Mimir (metrics_store = "mimir"). ClusterIP only.
 locals {
   tempo_trace_storage = merge(
     {
@@ -47,8 +47,9 @@ locals {
       # cannot be removed. Only OTLP is used; the Service is ClusterIP.
 
       metricsGenerator = {
-        enabled        = var.tempo_metrics_generator_enabled
-        remoteWriteUrl = "${local.prometheus_url}/api/v1/write"
+        enabled = var.tempo_metrics_generator_enabled
+        # Mimir (metrics_store = "mimir") or the in-cluster Prometheus.
+        remoteWriteUrl = local.metrics_to_mimir ? local.mimir_push_url : "${local.prometheus_url}/api/v1/write"
       }
       overrides = {
         defaults = var.tempo_metrics_generator_enabled ? {
@@ -106,8 +107,13 @@ resource "helm_release" "tempo" {
       error_message = "tempo_storage.bucket is required when tempo_storage.backend is gcs or s3."
     }
     precondition {
-      condition     = !var.tempo_metrics_generator_enabled || local.prometheus_remote_write_receiver_enabled
-      error_message = "tempo_metrics_generator_enabled needs the Prometheus remote-write receiver (prometheus_remote_write_receiver_enabled)."
+      condition     = !var.tempo_metrics_generator_enabled || local.prometheus_remote_write_receiver_enabled || (local.metrics_to_mimir && var.enable_mimir)
+      error_message = "tempo_metrics_generator_enabled needs a target: the Prometheus remote-write receiver (prometheus_remote_write_receiver_enabled) or metrics_store=mimir with enable_mimir."
+    }
+    precondition {
+      # The tempo chart's remote_write has no headers setting.
+      condition     = !(var.tempo_metrics_generator_enabled && local.metrics_to_mimir) || !var.mimir_multitenancy_enabled
+      error_message = "Tempo's metrics-generator cannot send the X-Scope-OrgID header: with metrics_store=mimir set mimir_multitenancy_enabled=false."
     }
   }
 }

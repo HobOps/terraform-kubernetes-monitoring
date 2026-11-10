@@ -3,7 +3,8 @@
 #     with Kubernetes metadata and forwards it to the gateway over OTLP.
 #   - gateway (Deployment): receives OTLP from the apps (and the agents), batches
 #     and fans out traces -> Tempo, logs -> Loki, metrics -> Prometheus (OTLP
-#     receiver). Apps only ever talk to the gateway.
+#     receiver) or Mimir (metrics_store = "mimir"). Apps only ever talk to the
+#     gateway.
 # Nothing is exposed outside the cluster (ClusterIP services only).
 
 resource "kubernetes_service_account" "otel_agent" {
@@ -223,6 +224,20 @@ locals {
         tls      = { insecure = true }
       }
     } : {},
+    local.metrics_to_mimir && local.mimir_otlp_url != null ? {
+      "otlphttp/mimir" = merge(
+        {
+          endpoint = local.mimir_otlp_url
+          tls      = { insecure = true }
+        },
+        length(local.mimir_tenant_headers) > 0 ? { headers = local.mimir_tenant_headers } : {},
+      )
+    } : {},
+  )
+
+  otel_gateway_metrics_exporters = concat(
+    local.prometheus_otlp_receiver_enabled ? ["otlphttp/prometheus"] : [],
+    local.metrics_to_mimir && local.mimir_otlp_url != null ? ["otlphttp/mimir"] : [],
   )
 
   otel_gateway_config = {
@@ -258,11 +273,11 @@ locals {
             exporters  = ["otlphttp/loki"]
           }
         } : {},
-        local.prometheus_otlp_receiver_enabled ? {
+        length(local.otel_gateway_metrics_exporters) > 0 ? {
           metrics = {
             receivers  = ["otlp"]
             processors = ["memory_limiter", "k8sattributes", "resource", "batch"]
-            exporters  = ["otlphttp/prometheus"]
+            exporters  = local.otel_gateway_metrics_exporters
           }
         } : {},
       )
@@ -355,7 +370,11 @@ resource "kubectl_manifest" "otel_gateway" {
   lifecycle {
     precondition {
       condition     = length(local.otel_gateway_exporters) > 0
-      error_message = "enable_otel_collector needs at least one backend: enable_loki, enable_tempo or the Prometheus OTLP receiver."
+      error_message = "enable_otel_collector needs at least one backend: enable_loki, enable_tempo, the Prometheus OTLP receiver or Mimir."
+    }
+    precondition {
+      condition     = !local.metrics_to_mimir || var.enable_mimir
+      error_message = "metrics_store=mimir needs enable_mimir=true (the gateway sends OTLP to the in-cluster Mimir)."
     }
   }
 }

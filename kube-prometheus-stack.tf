@@ -63,6 +63,10 @@ resource "helm_release" "kube_prometheus_stack" {
       error_message = "grafana_metrics_backend=mimir requires enable_mimir=true or mimir_url."
     }
     precondition {
+      condition     = var.prometheus_enabled || var.grafana_metrics_backend == "mimir"
+      error_message = "prometheus_enabled=false needs grafana_metrics_backend=mimir (Grafana would have no metrics datasource)."
+    }
+    precondition {
       condition     = !local.grafana_google_auth_enabled || var.grafana_hostname != null
       error_message = "grafana_google_auth requires grafana_hostname (OAuth redirect URL)."
     }
@@ -93,10 +97,14 @@ locals {
     )
   ]
 
+  # jsonencode/jsondecode: the optional pieces have different shapes.
   grafana_mimir_datasource = var.grafana_metrics_backend != "mimir" ? [] : [
     merge(
       {
-        name      = "Mimir"
+        name = "Mimir"
+        # Same uid kube-prometheus-stack gives its Prometheus datasource, so
+        # dashboards (and Tempo's service map) keep working after the switch.
+        uid       = var.grafana_metrics_datasource_uid
         type      = "prometheus"
         url       = local.mimir_query_url
         access    = "proxy"
@@ -106,24 +114,21 @@ locals {
             httpMethod     = "POST"
             prometheusType = "Mimir"
           },
-          var.mimir_tenant_id != null ? {
+          jsondecode(var.mimir_tenant_id == null ? "{}" : jsonencode({
             httpHeaderName1 = "X-Scope-OrgID"
-          } : {},
+          })),
         )
       },
-      var.mimir_tenant_id != null ? {
-        secureJsonData = {
-          httpHeaderValue1 = var.mimir_tenant_id
-        }
-      } : {},
-      var.mimir_basic_auth_username != null ? {
+      jsondecode(var.mimir_basic_auth_username == null ? "{}" : jsonencode({
         basicAuth     = true
         basicAuthUser = var.mimir_basic_auth_username
+      })),
+      jsondecode(var.mimir_tenant_id == null && var.mimir_basic_auth_username == null ? "{}" : jsonencode({
         secureJsonData = merge(
           var.mimir_tenant_id != null ? { httpHeaderValue1 = var.mimir_tenant_id } : {},
-          { basicAuthPassword = var.mimir_basic_auth_password },
+          var.mimir_basic_auth_username != null ? { basicAuthPassword = var.mimir_basic_auth_password } : {},
         )
-      } : {},
+      })),
     )
   ]
 
@@ -235,6 +240,7 @@ locals {
     )
 
     prometheus = {
+      enabled = var.prometheus_enabled
       prometheusSpec = merge(
         {
           retention     = var.prometheus_retention
